@@ -4,3 +4,5 @@ __pycache__/
 venv/
 forus-lab/
 .vscode/s
+.idea/
+/Gyroscope enabled friending prototype design document.pdf
