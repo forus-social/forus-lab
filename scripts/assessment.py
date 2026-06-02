@@ -30,6 +30,19 @@ def plot_axes(parsed_a: dict, parsed_b: dict):
     plt.show()
 
 
+def resample_to_common_grid(parsed_a: dict, parsed_b: dict, target_hz: float = 10) -> tuple:
+    t_start = max(parsed_a["t"][0], parsed_b["t"][0])
+    t_end   = min(parsed_a["t"][-1], parsed_b["t"][-1])
+    if t_end <= t_start:
+        raise ValueError("Recordings have no overlapping time window")
+    n = max(2, int((t_end - t_start) / 1000.0 * target_hz))
+    t_common = np.linspace(t_start, t_end, n)
+    channels = ("ax", "ay", "az", "gx", "gy", "gz")
+    def interp(parsed):
+        return {"t": t_common, **{ch: np.interp(t_common, parsed["t"], parsed[ch]) for ch in channels}}
+    return interp(parsed_a), interp(parsed_b)
+
+
 def to_univariate(parsed: dict) -> np.ndarray:
     accel_mag = np.sqrt(parsed["ax"]**2 + parsed["ay"]**2 + parsed["az"]**2)
     gyro_mag  = np.sqrt(parsed["gx"]**2 + parsed["gy"]**2 + parsed["gz"]**2)
@@ -64,9 +77,10 @@ def cross_correlate(sig_a: np.ndarray, sig_b: np.ndarray) -> float:
     return float(np.max(np.abs(cc)) / energy)
 
 
-def assess(parsed_a: dict, parsed_b: dict, plot: bool = True) -> float:
+def assess(parsed_a: dict, parsed_b: dict, plot: bool = False) -> float:
     if plot:
         plot_axes(parsed_a, parsed_b)
+    parsed_a, parsed_b = resample_to_common_grid(parsed_a, parsed_b)
     sig_a = to_univariate(parsed_a)
     sig_b = to_univariate(parsed_b)
     if plot:
@@ -75,6 +89,7 @@ def assess(parsed_a: dict, parsed_b: dict, plot: bool = True) -> float:
 
 
 if __name__ == "__main__":
+    import time as _time
     sys.path.insert(0, "scripts")
     from dummy_data_generator import simulate_shake, simulate_independent_shake, to_json_package
 
@@ -82,17 +97,19 @@ if __name__ == "__main__":
     incongruous_scores = []
 
     for i in range(10):
+        base_ms = int(_time.time() * 1000)
         a, b = simulate_shake()
-        score = assess(parse_reading(to_json_package(a, "A")),
-                       parse_reading(to_json_package(b, "B")),
+        score = assess(parse_reading(to_json_package(a, "A", base_ms=base_ms)),
+                       parse_reading(to_json_package(b, "B", base_ms=base_ms)),
                        plot=False)
         congruous_scores.append(score)
         print(f"congruous    {i+1:2d}: {score:.4f}")
 
     for i in range(10):
+        base_ms = int(_time.time() * 1000)
         a, b = simulate_independent_shake()
-        score = assess(parse_reading(to_json_package(a, "A")),
-                       parse_reading(to_json_package(b, "B")),
+        score = assess(parse_reading(to_json_package(a, "A", base_ms=base_ms)),
+                       parse_reading(to_json_package(b, "B", base_ms=base_ms)),
                        plot=False)
         incongruous_scores.append(score)
         print(f"incongruous  {i+1:2d}: {score:.4f}")

@@ -1,10 +1,14 @@
 import json
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.assessment import assess, load_reading
 
 app = FastAPI()
 
@@ -95,9 +99,13 @@ def receive_reading(reading: Reading):
 def trigger_assessment(filepath_a: str, filepath_b: str):
     """
     Called when two readings arrive near-simultaneously.
-
-    TODO: Add actual algorithm call.
+    Runs the cross-correlation assessment and prints the score.
     """
-    print(f"[ASSESSMENT] Comparing:")
-    print(f"  A: {filepath_a}")
-    print(f"  B: {filepath_b}")
+    name_a = Path(filepath_a).name
+    name_b = Path(filepath_b).name
+    print(f"[ASSESSMENT] Comparing {name_a} <-> {name_b}")
+    try:
+        score = assess(load_reading(filepath_a), load_reading(filepath_b))
+        print(f"[ASSESSMENT] score={score:.4f}")
+    except Exception as e:
+        print(f"[ASSESSMENT] FAILED: {type(e).__name__}: {e}")

@@ -1,3 +1,4 @@
+import time as _time
 import numpy as np
 
 def simulate_shake(duration=5.0, sample_rate=100, sigma_shared=1.0, 
@@ -93,11 +94,13 @@ def simulate_independent_shake(duration=5.0, sample_rate=100, sigma=1.0):
     return make_phone(), make_phone()
 
 
-def to_json_package(phone_dict, device_id="phone", session_id="session"):
+def to_json_package(phone_dict, device_id="phone", session_id="session", base_ms=None):
     t = phone_dict["t"]
+    if base_ms is None:
+        base_ms = int(_time.time() * 1000)
     samples = [
         {
-            "t": int(i),
+            "t": base_ms + int(t[i] * 1000),
             "ax": float(phone_dict["ax"][i]),
             "ay": float(phone_dict["ay"][i]),
             "az": float(phone_dict["az"][i]),
