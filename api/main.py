@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from scripts.assessment import assess, load_reading
+from scripts.assessment import assess, load_reading, is_match
 
 app = FastAPI()
 
@@ -36,11 +36,26 @@ DATA_DIR.mkdir(exist_ok=True)
 SIMULTANEOUS_WINDOW_S = 5.0
 recent_arrivals: list[dict] = []
 
+# Result store: keyed by device_id, holds latest assessment result
+results: dict[str, dict] = {}
+
 
 @app.get("/health")
 def health():
     """Quick ping endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/result/{device_id}")
+def get_result(device_id: str):
+    """Poll for the latest assessment result for this device."""
+    r = results.get(device_id)
+    if r is None:
+        return {"status": "pending"}
+    if time.time() - r["ts"] > 60:
+        del results[device_id]
+        return {"status": "pending"}
+    return r
 
 
 @app.post("/readings")
@@ -86,7 +101,10 @@ def receive_reading(reading: Reading):
 
     for match in matches:
         print(f"[MATCH] Near-simultaneous pair: {reading.device_id} + {match['device_id']}")
-        trigger_assessment(str(filepath), match["filepath"])
+        trigger_assessment(
+            reading.device_id, str(filepath),
+            match["device_id"], match["filepath"],
+        )
 
     return {
         "status": "ok",
@@ -95,17 +113,28 @@ def receive_reading(reading: Reading):
     }
 
 
-# Handoff to Assessment Algorithm
-def trigger_assessment(filepath_a: str, filepath_b: str):
+def trigger_assessment(device_a: str, filepath_a: str, device_b: str, filepath_b: str):
     """
     Called when two readings arrive near-simultaneously.
-    Runs the cross-correlation assessment and prints the score.
+    Scores the pair, stores the result under both device IDs for polling.
     """
     name_a = Path(filepath_a).name
     name_b = Path(filepath_b).name
     print(f"[ASSESSMENT] Comparing {name_a} <-> {name_b}")
     try:
-        score = assess(load_reading(filepath_a), load_reading(filepath_b))
-        print(f"[ASSESSMENT] score={score:.4f}")
+        accel_score, gyro_score = assess(load_reading(filepath_a), load_reading(filepath_b))
+        matched = is_match(accel_score, gyro_score)
+        ts = time.time()
+        results[device_a] = {
+            "status": "ready", "match": matched,
+            "accel_score": accel_score, "gyro_score": gyro_score,
+            "partner": device_b, "ts": ts,
+        }
+        results[device_b] = {
+            "status": "ready", "match": matched,
+            "accel_score": accel_score, "gyro_score": gyro_score,
+            "partner": device_a, "ts": ts,
+        }
+        print(f"[ASSESSMENT] accel={accel_score:.4f}  gyro={gyro_score:.4f}  match={matched}")
     except Exception as e:
         print(f"[ASSESSMENT] FAILED: {type(e).__name__}: {e}")

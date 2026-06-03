@@ -5,6 +5,14 @@ import matplotlib.pyplot as plt
 from scipy.signal import correlate
 
 
+ACCEL_THRESHOLD = 0.6
+GYRO_THRESHOLD  = 0.5
+
+
+def is_match(accel_score: float, gyro_score: float) -> bool:
+    return accel_score >= ACCEL_THRESHOLD and gyro_score >= GYRO_THRESHOLD
+
+
 def parse_reading(data: dict) -> dict:
     samples = data["samples"]
     keys = ("t", "ax", "ay", "az", "gx", "gy", "gz")
@@ -43,20 +51,22 @@ def resample_to_common_grid(parsed_a: dict, parsed_b: dict, target_hz: float = 1
     return interp(parsed_a), interp(parsed_b)
 
 
-def to_univariate(parsed: dict) -> np.ndarray:
-    accel_mag = np.sqrt(parsed["ax"]**2 + parsed["ay"]**2 + parsed["az"]**2)
-    gyro_mag  = np.sqrt(parsed["gx"]**2 + parsed["gy"]**2 + parsed["gz"]**2)
-
-    def zscore(v):
-        std = v.std()
-        return (v - v.mean()) / std if std > 0 else v - v.mean()
-
-    return zscore(accel_mag) + zscore(gyro_mag)
+def _zscore(v: np.ndarray) -> np.ndarray:
+    std = v.std()
+    return (v - v.mean()) / std if std > 0 else v - v.mean()
 
 
-def plot_univariate(sig_a: np.ndarray, sig_b: np.ndarray):
+def to_accel_signal(parsed: dict) -> np.ndarray:
+    return _zscore(np.sqrt(parsed["ax"]**2 + parsed["ay"]**2 + parsed["az"]**2))
+
+
+def to_gyro_signal(parsed: dict) -> np.ndarray:
+    return _zscore(np.sqrt(parsed["gx"]**2 + parsed["gy"]**2 + parsed["gz"]**2))
+
+
+def plot_univariate(sig_a: np.ndarray, sig_b: np.ndarray, title: str = "z-scored magnitude"):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 3), sharey=True)
-    fig.suptitle("Univariate signal (z-scored accel mag + gyro mag)")
+    fig.suptitle(title)
     ax1.plot(sig_a, linewidth=0.8)
     ax1.set_title("Device A")
     ax1.set_xlabel("sample")
@@ -77,15 +87,17 @@ def cross_correlate(sig_a: np.ndarray, sig_b: np.ndarray) -> float:
     return float(np.max(np.abs(cc)) / energy)
 
 
-def assess(parsed_a: dict, parsed_b: dict, plot: bool = False) -> float:
+def assess(parsed_a: dict, parsed_b: dict, plot: bool = False) -> tuple[float, float]:
+    """Returns (accel_score, gyro_score), each a normalized cross-correlation in [0, 1]."""
     if plot:
         plot_axes(parsed_a, parsed_b)
     parsed_a, parsed_b = resample_to_common_grid(parsed_a, parsed_b)
-    sig_a = to_univariate(parsed_a)
-    sig_b = to_univariate(parsed_b)
+    accel_a, accel_b = to_accel_signal(parsed_a), to_accel_signal(parsed_b)
+    gyro_a,  gyro_b  = to_gyro_signal(parsed_a),  to_gyro_signal(parsed_b)
     if plot:
-        plot_univariate(sig_a, sig_b)
-    return cross_correlate(sig_a, sig_b)
+        plot_univariate(accel_a, accel_b, title="Accelerometer magnitude (z-scored)")
+        plot_univariate(gyro_a,  gyro_b,  title="Gyroscope magnitude (z-scored)")
+    return cross_correlate(accel_a, accel_b), cross_correlate(gyro_a, gyro_b)
 
 
 if __name__ == "__main__":
@@ -99,20 +111,22 @@ if __name__ == "__main__":
     for i in range(10):
         base_ms = int(_time.time() * 1000)
         a, b = simulate_shake()
-        score = assess(parse_reading(to_json_package(a, "A", base_ms=base_ms)),
-                       parse_reading(to_json_package(b, "B", base_ms=base_ms)),
-                       plot=False)
-        congruous_scores.append(score)
-        print(f"congruous    {i+1:2d}: {score:.4f}")
+        accel, gyro = assess(parse_reading(to_json_package(a, "A", base_ms=base_ms)),
+                             parse_reading(to_json_package(b, "B", base_ms=base_ms)),
+                             plot=False)
+        congruous_scores.append((accel, gyro))
+        print(f"congruous    {i+1:2d}: accel={accel:.4f}  gyro={gyro:.4f}")
 
     for i in range(10):
         base_ms = int(_time.time() * 1000)
         a, b = simulate_independent_shake()
-        score = assess(parse_reading(to_json_package(a, "A", base_ms=base_ms)),
-                       parse_reading(to_json_package(b, "B", base_ms=base_ms)),
-                       plot=False)
-        incongruous_scores.append(score)
-        print(f"incongruous  {i+1:2d}: {score:.4f}")
+        accel, gyro = assess(parse_reading(to_json_package(a, "A", base_ms=base_ms)),
+                             parse_reading(to_json_package(b, "B", base_ms=base_ms)),
+                             plot=False)
+        incongruous_scores.append((accel, gyro))
+        print(f"incongruous  {i+1:2d}: accel={accel:.4f}  gyro={gyro:.4f}")
 
-    print(f"\nmean congruous:    {np.mean(congruous_scores):.4f}")
-    print(f"mean incongruous:  {np.mean(incongruous_scores):.4f}")
+    c = np.array(congruous_scores)
+    ic = np.array(incongruous_scores)
+    print(f"\nmean congruous:    accel={c[:,0].mean():.4f}  gyro={c[:,1].mean():.4f}")
+    print(f"mean incongruous:  accel={ic[:,0].mean():.4f}  gyro={ic[:,1].mean():.4f}")

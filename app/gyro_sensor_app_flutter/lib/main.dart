@@ -29,7 +29,7 @@ class MyApp extends StatelessWidget {
 }
 
 class CombinedSensorSample { //this is a class to store each sample from the sensor as well as a timestamp
-  final int t; 
+  final int t;
   final double ax, ay, az;
   final double gx, gy, gz;
 
@@ -46,7 +46,7 @@ class CombinedSensorSample { //this is a class to store each sample from the sen
       };
 }
 
-class MyHomePage extends StatefulWidget { //this is another shell part of the app that i dont really understand, has something to do with the main page 
+class MyHomePage extends StatefulWidget { //this is another shell part of the app that i dont really understand, has something to do with the main page
   const MyHomePage({super.key, required this.title});
   final String title;
 
@@ -62,13 +62,14 @@ class _MyHomePageState extends State<MyHomePage> {
   int _selectedTime = 10;         //default states
   int _timeLeft = 0;
   bool _isRecording = false;
+  bool _isWaiting = false;        // true while polling for pairing result
   Timer? _timer;
-  
-  final List<CombinedSensorSample> _recordedSamples = []; 
-  DateTime? _startTime; 
-  
+
+  final List<CombinedSensorSample> _recordedSamples = [];
+  DateTime? _startTime;
+
   StreamSubscription<GyroscopeEvent>? _gyroSubscription;
-  StreamSubscription<AccelerometerEvent>? _accelSubscription; 
+  StreamSubscription<AccelerometerEvent>? _accelSubscription;
 
   double _latestGx = 0.0;
   double _latestGy = 0.0;
@@ -82,7 +83,7 @@ class _MyHomePageState extends State<MyHomePage> {
     ));
   }
 
-  void _startRecording() {                        //everything here occurs when the recording is started 
+  void _startRecording() {                        //everything here occurs when the recording is started
     if (_deviceIdController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a Device ID first!')),
@@ -96,10 +97,11 @@ class _MyHomePageState extends State<MyHomePage> {
 
     setState(() {     //happens when recording is started
       _isRecording = true;
+      _isWaiting = false;
       _timeLeft = _selectedTime;
-      _recordedSamples.clear(); 
-      _startTime = DateTime.now(); 
-      _currentSessionId = _generateSessionId(); 
+      _recordedSamples.clear();
+      _startTime = DateTime.now();
+      _currentSessionId = _generateSessionId();
     });
 
     _gyroSubscription = gyroscopeEventStream().listen((GyroscopeEvent event) {    //these subscriptions use streams which im not super familer with, seems to just constantly read data
@@ -110,34 +112,70 @@ class _MyHomePageState extends State<MyHomePage> {
 
     _accelSubscription = accelerometerEventStream().listen((AccelerometerEvent event) {
       _recordedSamples.add(CombinedSensorSample(
-        DateTime.now().millisecondsSinceEpoch, 
-        event.x, event.y, event.z,             
-        _latestGx, _latestGy, _latestGz        
+        DateTime.now().millisecondsSinceEpoch,
+        event.x, event.y, event.z,
+        _latestGx, _latestGy, _latestGz
       ));
-      setState(() {}); 
+      setState(() {});
     });
 
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {   //count don the timer
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {   //count down the timer
       setState(() {
         if (_timeLeft > 0) {
           _timeLeft--;
         } else {      //fixes the state when the timer is up
           _isRecording = false;
           timer.cancel();
-          _gyroSubscription?.cancel(); 
-          _accelSubscription?.cancel(); 
+          _gyroSubscription?.cancel();
+          _accelSubscription?.cancel();
+          _uploadAndPoll();  // auto-upload and wait for result
         }
       });
     });
   }
 
-  Future<void> _uploadToServer() async {
+  // Upload the reading then poll for the pairing result.
+  Future<void> _uploadAndPoll() async {
+    final ok = await _doUpload();
+    if (!ok || !mounted) return;
+
+    setState(() => _isWaiting = true);
+
+    final deviceId = _deviceIdController.text.trim();
+    final base = _serverUrlController.text.trim();
+
+    for (int i = 0; i < 8; i++) {
+      await Future.delayed(const Duration(seconds: 2));
+      if (!mounted) return;
+      try {
+        final resp = await http
+            .get(Uri.parse('$base/result/$deviceId'))
+            .timeout(const Duration(seconds: 5));
+        final body = jsonDecode(resp.body) as Map<String, dynamic>;
+        if (body['status'] == 'ready') {
+          if (!mounted) return;
+          setState(() => _isWaiting = false);
+          _showResultDialog(body);
+          return;
+        }
+      } catch (_) {}
+    }
+
+    if (!mounted) return;
+    setState(() => _isWaiting = false);
+    _showResultDialog({'status': 'timeout'});
+  }
+
+  // Does the HTTP POST. Returns true on success, shows SnackBar on failure.
+  Future<bool> _doUpload() async {
     final url = _serverUrlController.text.trim();
     if (url.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter the server URL first.')),
-      );
-      return;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Enter the server URL first.')),
+        );
+      }
+      return false;
     }
 
     final Map<String, dynamic> payload = {
@@ -146,37 +184,73 @@ class _MyHomePageState extends State<MyHomePage> {
       "samples": _recordedSamples.map((s) => s.toJson()).toList(),
     };
 
-    final endpoint = Uri.parse('$url/readings');
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Uploading to $endpoint ...'), duration: const Duration(seconds: 2)),
-    );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Uploading...'), duration: Duration(seconds: 2)),
+      );
+    }
 
     try {
       final response = await http.post(
-        endpoint,
+        Uri.parse('$url/readings'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(payload),
       ).timeout(const Duration(seconds: 10));
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload ${response.statusCode}: ${response.body}')),
-      );
+      return response.statusCode == 200;
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Upload failed: $e')),
+        );
+      }
+      return false;
     }
+  }
+
+  void _showResultDialog(Map<String, dynamic> result) {
+    final isTimeout = result['status'] == 'timeout';
+    final matched   = result['match'] == true;
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(
+          isTimeout ? 'No partner found'
+          : matched ? '✓ Match!'
+                    : '✗ No match',
+          style: TextStyle(
+            color: isTimeout ? Colors.orange
+                 : matched   ? Colors.green
+                             : Colors.red,
+            fontWeight: FontWeight.bold,
+            fontSize: 22,
+          ),
+        ),
+        content: isTimeout
+            ? const Text('No second device uploaded within the time window.')
+            : Text(
+                'Accel:   ${(result['accel_score'] as double).toStringAsFixed(3)}\n'
+                'Gyro:    ${(result['gyro_score']  as double).toStringAsFixed(3)}\n'
+                'Partner: ${result['partner']}',
+                style: const TextStyle(fontSize: 16),
+              ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _previewAndShare() async {   //all this is to do with the exporting of the JSON, not rlly pertinant to the final app so dont worry about it
     Map<String, dynamic> finalPayload = {
       "device_id": _deviceIdController.text.trim(),
-      "session_id": _currentSessionId, 
+      "session_id": _currentSessionId,
       "samples": _recordedSamples.map((sample) => sample.toJson()).toList(),
     };
-    
+
     String jsonString = const JsonEncoder.withIndent('  ').convert(finalPayload);
 
     showDialog(
@@ -206,15 +280,15 @@ class _MyHomePageState extends State<MyHomePage> {
                   await file.writeAsString(jsonString);
 
                   await Share.shareXFiles(
-                    [XFile(file.path)], 
+                    [XFile(file.path)],
                     text: 'Sensor Data: $_currentSessionId',
 
                     sharePositionOrigin: Rect.fromLTWH(0, 0, size.width, size.height / 2),
                   );
-                  
+
                 } catch (e) {
                   print("🚨 EXPORT ERROR: $e");   //I was getting a weird error when tryna get the IOS file share dialog to pop up so this is useful for debugging
-                                                  // itll be printed in the debug of your ide 
+                                                  // itll be printed in the debug of your ide
                 }
               },
             ),
@@ -224,7 +298,7 @@ class _MyHomePageState extends State<MyHomePage> {
     );
   }
 
-  @override   // good practice to close all streams, even though we did it when the timer finished 
+  @override   // good practice to close all streams, even though we did it when the timer finished
   void dispose() {
     _timer?.cancel();
     _gyroSubscription?.cancel();
@@ -234,7 +308,7 @@ class _MyHomePageState extends State<MyHomePage> {
     super.dispose();
   }
 
-  Widget _buildSensorChart(bool isAccel) {    //this is for charting, again not super pertinant 
+  Widget _buildSensorChart(bool isAccel) {    //this is for charting, again not super pertinant
     if (_recordedSamples.isEmpty) return const SizedBox(height: 150, child: Center(child: Text('No data yet')));
 
     List<FlSpot> spotsX = [];
@@ -243,10 +317,10 @@ class _MyHomePageState extends State<MyHomePage> {
 
     for (var sample in _recordedSamples) {
       if (_startTime == null) continue;
-      
+
       DateTime sampleTime = DateTime.fromMillisecondsSinceEpoch(sample.t);
       double timeSeconds = sampleTime.difference(_startTime!).inMilliseconds / 1000.0;
-      
+
       if (isAccel) {
         spotsX.add(FlSpot(timeSeconds, sample.ax));
         spotsY.add(FlSpot(timeSeconds, sample.ay));
@@ -278,6 +352,8 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {  //below is all the UI aspects of the app
+    final bool busy = _isRecording || _isWaiting;
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
@@ -291,12 +367,12 @@ class _MyHomePageState extends State<MyHomePage> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                
+
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20.0),
                   child: TextField(
                     controller: _serverUrlController,
-                    enabled: !_isRecording,
+                    enabled: !busy,
                     keyboardType: TextInputType.url,
                     autocorrect: false,
                     decoration: const InputDecoration(
@@ -313,7 +389,7 @@ class _MyHomePageState extends State<MyHomePage> {
                   padding: const EdgeInsets.symmetric(horizontal: 20.0),
                   child: TextField(                                         //this is for the deivce id
                     controller: _deviceIdController,
-                    enabled: !_isRecording,
+                    enabled: !busy,
                     decoration: const InputDecoration(
                       labelText: 'Device ID',
                       border: OutlineInputBorder(),
@@ -331,7 +407,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     const SizedBox(width: 10),
                     DropdownButton<int>(
                       value: _selectedTime,
-                      onChanged: _isRecording ? null : (int? newValue) {
+                      onChanged: busy ? null : (int? newValue) {
                         setState(() {
                           if (newValue != null) _selectedTime = newValue;
                         });
@@ -346,12 +422,21 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  _isRecording ? 'Time left: $_timeLeft s' : 'Ready to record',         // this is for the status dialog that comes up when recording
+                  _isWaiting    ? 'Waiting for partner...'
+                  : _isRecording ? 'Time left: $_timeLeft s'
+                                 : 'Ready to record',
                   style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 10),
+
+                if (_isWaiting)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8.0),
+                    child: CircularProgressIndicator(),
+                  ),
+
                 ElevatedButton(
-                  onPressed: _isRecording ? null : _startRecording,
+                  onPressed: busy ? null : _startRecording,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.deepPurple,
                     foregroundColor: Colors.white,
@@ -364,11 +449,11 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 const SizedBox(height: 10),
 
-                if (_recordedSamples.isNotEmpty && !_isRecording) ...[
+                if (_recordedSamples.isNotEmpty && !busy) ...[
                   ElevatedButton.icon(
                     icon: const Icon(Icons.cloud_upload),
                     label: const Text('Upload to Server'),
-                    onPressed: _uploadToServer,
+                    onPressed: _uploadAndPoll,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.green.shade700,
                       foregroundColor: Colors.white,
@@ -387,18 +472,18 @@ class _MyHomePageState extends State<MyHomePage> {
                     ),
                   ),
                 ],
-                
+
                 const SizedBox(height: 20),//these are the graphs
-                
+
                 const Text('Accelerometer', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 const Text('X: Red | Y: Green | Z: Blue', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                _buildSensorChart(true), 
-                
+                _buildSensorChart(true),
+
                 const SizedBox(height: 20),
-                
+
                 const Text('Gyroscope', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 const Text('X: Red | Y: Green | Z: Blue', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                _buildSensorChart(false), 
+                _buildSensorChart(false),
               ],
             ),
           ),
